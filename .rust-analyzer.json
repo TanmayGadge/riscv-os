@@ -1,0 +1,9 @@
+{
+  "diagnostics": {
+    "disabled": [
+      "unresolved-proc-macro",
+      "macro-error",
+      "incorrect-unsafe-attribute"
+    ]
+  }
+}
