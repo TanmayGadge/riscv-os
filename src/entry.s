@@ -3,13 +3,13 @@
 
 _start:
     # Set up the stack pointer.
-    # Reserve 64 KB for the stack (you can change this later).
+    # Reserve 64 KB for the stack
     la sp, stack_top
 
     # Jump to Rust kernel entry
     call kmain
 
-    # If kmain ever returns (it shouldn't), just loop here forever.
+    # If kmain ever returns 
 1:
     j 1b
 
@@ -21,8 +21,8 @@ _start:
     .globl stack_bottom
     .globl stack_top
 
-    # 64 KB stack
-    .align 16
+
+    .align 16 #risc-v required memory address to be multiple of 16
 stack_bottom:
-    .space 64 * 1024
+    .space 64 * 1024 
 stack_top:
