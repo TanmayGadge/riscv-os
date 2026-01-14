@@ -3,6 +3,7 @@
 
 mod uart;
 mod pmm;
+mod paging;
 
 use core::panic::PanicInfo;
 use core::arch::global_asm;

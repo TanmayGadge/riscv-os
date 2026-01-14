@@ -15,6 +15,6 @@ impl PhysicalMemoryManager {
         
         // The "Bump" Allocator
         self.next_free_page += 4096;
-        address
+        address //No semicolon means return automatically
     }
 }
