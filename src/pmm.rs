@@ -9,12 +9,12 @@ impl PhysicalMemoryManager {
         }
     }
 
-    pub fn alloc_page(&mut self) -> usize{
+    pub fn alloc_page(&mut self) -> Option<usize>{
 
         let address: usize = self.next_free_page;
         
         // The "Bump" Allocator
         self.next_free_page += 4096;
-        address //No semicolon means return automatically
+        Some(address)
     }
 }
