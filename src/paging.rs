@@ -69,7 +69,7 @@ impl PageTable {
             unsafe { Some(&mut *table_ptr) }
 
         }else{
-            let new_page_addr = allocator.alloc_page()?;
+            let new_page_addr: usize = allocator.alloc_page()?;
             let new_table: &mut PageTable = unsafe{ &mut *(new_page_addr as *mut PageTable)};
 
             new_table.entries = [PageTableEntry {entry: 0}; 512];

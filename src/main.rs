@@ -4,6 +4,7 @@
 mod uart;
 mod pmm;
 mod paging;
+mod trap;
 
 use core::panic::PanicInfo;
 use core::arch::global_asm;
@@ -58,12 +59,12 @@ pub extern "C" fn kmain() -> ! {
 
     uart::uart_print("Enabling MMU...\n");
 
-    let root_ppn = (root_ptr as usize) >> 12;
-    let satp_val = (8 << 60) | root_ppn;
+    let root_ppn: usize = (root_ptr as usize) >> 12;
+    let satp_val: usize = (8 << 60) | root_ppn; //for Sv39, mode = 8
 
     unsafe{
         core::arch::asm!("csrw satp, {}", in(reg) satp_val);
-        core::arch::asm!("sfence.vma");
+        core::arch::asm!("sfence.vma"); //Clear TLB
     }
 
 
