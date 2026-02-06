@@ -5,7 +5,7 @@ SECTIONS
 {
     . = 0x80200000; /*Set location counter for openSBI*/
 
-    .text : {
+    .text : { /*Executable Code*/
         *(.text.entry)
         *(.text .text.*)
     }
@@ -23,7 +23,7 @@ SECTIONS
         *(COMMON)
     }
 
-    . = ALIGN(4096);
+    . = ALIGN(4096); /*Ensure heap starts on a freash page*/
 
     _heap_start = .;
 }

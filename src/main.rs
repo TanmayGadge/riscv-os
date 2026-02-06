@@ -1,59 +1,48 @@
 #![no_std]
 #![no_main]
 
-mod uart;
-mod pmm;
 mod paging;
+mod pmm;
 mod trap;
+mod uart;
 
-use core::panic::PanicInfo;
 use core::arch::global_asm;
+use core::panic::PanicInfo;
 
 use paging::{PageTable, PageTableEntryFlags};
 
-use crate::paging::PageTableEntry;
+use crate::{paging::PageTableEntry, trap::trap_handler};
 
 global_asm!(include_str!("entry.s"));
 
-unsafe extern "C"{
+unsafe extern "C" {
     unsafe static _heap_start: u8;
     unsafe static _start: u8;
+    unsafe fn trap_vector();
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
     uart::uart_print("Hello World!\n");
 
-
-    let heap_start: usize = unsafe {core::ptr::addr_of!(_heap_start) as usize};
+    let heap_start: usize = unsafe { core::ptr::addr_of!(_heap_start) as usize };
     let mut pmm: pmm::PhysicalMemoryManager = pmm::PhysicalMemoryManager::new(heap_start);
 
     let root_ptr: *mut PageTable = pmm.alloc_page().expect("OOM") as *mut PageTable;
-    let root_table: &mut PageTable = unsafe{&mut *root_ptr};
+    let root_table: &mut PageTable = unsafe { &mut *root_ptr };
 
-    root_table.entries = [paging::PageTableEntry {entry: 0}; 512];
+    root_table.entries = [paging::PageTableEntry { entry: 0 }; 512];
 
     uart::uart_print("Building Page Tables..\n");
 
+    root_table.map(&mut pmm, 0x1000_0000, 0x1000_0000, PageTableEntryFlags::RWX);
 
-    root_table.map(
-        &mut pmm,
-        0x1000_0000,
-        0x1000_0000,
-        PageTableEntryFlags::RWX
-    );
-
-    let kernel_start: usize = unsafe{core::ptr::addr_of!(_start) as usize};
+    let kernel_start: usize = unsafe { core::ptr::addr_of!(_start) as usize };
     let mut addr: usize = kernel_start;
 
     //Identity mapping
-    while addr < heap_start + 4096 * 100{
-        root_table.map(
-            &mut pmm,
-            addr,
-            addr,
-            PageTableEntryFlags::RWX
-        );
+    while addr < heap_start + 4096 * 100 {
+        root_table.map(&mut pmm, addr, addr, PageTableEntryFlags::RWX);
         addr += 4096;
     }
 
@@ -62,13 +51,25 @@ pub extern "C" fn kmain() -> ! {
     let root_ppn: usize = (root_ptr as usize) >> 12;
     let satp_val: usize = (8 << 60) | root_ppn; //for Sv39, mode = 8
 
-    unsafe{
+    unsafe {
         core::arch::asm!("csrw satp, {}", in(reg) satp_val);
         core::arch::asm!("sfence.vma"); //Clear TLB
     }
 
-
     uart::uart_print("MMU Enabled! We are still alive!\n");
+
+    let trap_addr: usize = trap_vector as usize;
+    let sie_value: usize;
+
+    assert!(trap_addr % 4 == 0, "Trap handler must be 4-byte aligned!");
+ 
+    
+    unsafe {
+        core::arch::asm!("csrw stvec {}", in(reg) trap_addr);
+        core::arch::asm!("csrrsi x0, sstatus, 2", options(nostack, nomem)); //set SIE (bit 1) as 1
+        core::arch::asm!("csrrsi x0, sie, 32", options(nostack, nomem)); //set STIE (bit 5) as 1
+    }
+
 
     // let page1: usize = pmm.alloc_page();
     // let page2: usize = pmm.alloc_page();
@@ -80,10 +81,8 @@ pub extern "C" fn kmain() -> ! {
     //     uart::uart_print("Memory Allocation Failed!\n");
     // }
 
-
     loop {}
 }
-
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {

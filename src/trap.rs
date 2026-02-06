@@ -37,26 +37,11 @@ pub extern "C" fn trap_handler() -> usize{
                         in("a2") 0usize,
                         in("a7") 0usize, // SBI_SET_TIMER = 0
                     );
+
+                    core::arch::asm!("sret");
                 }
 
-                // unsafe{
-                //     core::arch::asm!("csrr {} time", out(reg) mtime); //mtime in M-mode = time in S-Mode CSR
-                //     core::arch::asm!("csrr {} mtimecmp", out(reg) mtimecmp);
-    
-                //     // core::arch::asm!(
-                //     //     "csrr t0, mtime",
-                //     //     "csrr t1, mtimecmp",
-                //     //     ""
-                //     // )
-                // }
-    
-                // if mtime >= mtimecmp{
-                //     mtimecmp += mtime;
-                // }
-    
-                // unsafe{
-                //     core::arch::asm!("csrw mtimecmp {}", in(reg) mtimecmp);
-                // }
+                
             }
         }
 
