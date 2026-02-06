@@ -38,7 +38,7 @@ pub extern "C" fn trap_handler() -> usize{
                         in("a7") 0usize, // SBI_SET_TIMER = 0
                     );
 
-                    core::arch::asm!("sret");
+                    
                 }
 
                 
@@ -47,6 +47,27 @@ pub extern "C" fn trap_handler() -> usize{
 
     }else{
         //Handle Exceptions (page faults, ecall, etc.)
+
+        match cause_code{
+            /*
+            8: ecall from u-mode
+            9: ecall from s-mode
+            11: ecall from m-mode
+            */
+
+            9 => {
+                let mut sepc_value: usize;
+                unsafe{
+                    core::arch::asm!("csrr {} sepc", out(reg) sepc_value);
+                }
+
+                sepc_value += 4; //increment by 4 bytes
+
+                unsafe{
+                    core::arch::asm!("csrw sepc {}", in(reg) sepc_value);
+                }
+            }
+        }
     }        
 
     0
