@@ -22,15 +22,13 @@ pub extern "C" fn trap_handler() -> (){
     if is_interrupt{
         
         match cause_code{
-            5 => { 
-                let mtime: usize;
-                let mut mtimecmp: usize;
+            5 => {
 
                 TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
                 let now: usize;
                 unsafe{
-                    core::arch::asm!("rdtime {}", out(reg) now); //rdtime = pseudo-instruction to read current timer
+                    core::arch::asm!("rdtime {}", out(reg) now); //rdtime = pseudo-instruction to read current timer (mtime)
                 }
 
                 const TIMER_INTERVAL: usize = 1_000_000;
@@ -38,11 +36,12 @@ pub extern "C" fn trap_handler() -> (){
 
                 unsafe {
                     core::arch::asm!(
-                        // Non legacy calling convention
                         "ecall",
                         in("a0") next, // arg0: absolute time
-                        in("a6") 0usize,
-                        in("a7") 0x54494D45, 
+                        in("a6") 0usize, // Function: set_timer (update mtimecmp)
+                        in("a7") 0x54494D45usize, // Extension: TIME
+                        lateout("a0") _, // stores error value after call
+                        lateout("a1") _, // stores return value after call
                     );
 
                     

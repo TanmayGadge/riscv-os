@@ -19,11 +19,15 @@ SECTIONS
     }
 
     .bss : {
+        *(.bss .bss.stack)
+        *(.bss .bss.trap_stack)
         *(.bss .bss.*)
         *(COMMON)
+        . = ALIGN(4096);
+        _bss_end = .;
     }
 
-    . = ALIGN(4096); /*Ensure heap starts on a freash page*/
+    . = ALIGN(4096); /*Ensure heap starts on a fresh page*/
 
     _heap_start = .;
 }

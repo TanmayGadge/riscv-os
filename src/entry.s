@@ -1,40 +1,51 @@
-    .section .text.entry
-    .globl _start
-    .globl trap_vector
+.section .text.entry
+.globl _start
+.globl trap_vector
 
+.section .bss.stack
+.globl stack_bottom
+.globl stack_top
+
+.section .text.entry
 _start:
     # Set up the stack pointer.
-    # Reserve 64 KB for the stack
     la sp, stack_top
 
-    # Jump to Rust kernel entry
-    call kmain
+    la t0, trap_stack_top
 
-    # If kmain ever returns 
+    csrw sscratch, t0
+
+    call kmain
 1:
     j 1b
 
 
-    # -------------------------
-    # Allocate a simple stack
-    # -------------------------
-    .section .bss.stack
-    .globl stack_bottom
-    .globl stack_top
 
-    
+.section .bss.stack
 
-
-    .align 16 #risc-v required memory address to be multiple of 16
+.balign 16 # 16 byte alignment
 stack_bottom:
     .space 64 * 1024 
+.balign 16 
 stack_top:
 
-    .section .text
-    .globl trap_vector
+.section .bss.trap_stack
+.globl trap_stack_bottom
+.globl trap_stack_top
 
-.align 4 # trap-vector must be 16-byte (2^4) aligned
+.balign 16 
+trap_stack_bottom:
+    .space 4 * 1024
+
+trap_stack_top:
+
+.section .text.entry
+
+.balign 16 
 trap_vector:
+
+    csrrw sp, sscratch, sp
+
     addi sp, sp, -272
 
     sd ra, 0(sp)
@@ -71,6 +82,9 @@ trap_vector:
 
     csrr t0, sepc
     sd t0, 248(sp)
+    
+    csrr t1, sscratch
+    sd t1, 8(sp)
 
     call trap_handler
 
@@ -109,5 +123,13 @@ trap_vector:
     ld t0, 248(sp)
     csrw sepc, t0
 
+    
+    ld t1, 8(sp)
+    csrw sscratch, t1
     addi sp, sp, 272
+
+    csrrw sp, sscratch, sp
+
     sret
+
+

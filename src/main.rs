@@ -21,13 +21,14 @@ unsafe extern "C" {
     unsafe static _heap_start: u8;
     unsafe static _start: u8;
     unsafe fn trap_vector();
+    unsafe static _bss_end: u8;
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
-    uart::uart_print("Hello World!\n");
+    uart::uart_print("Booting Kernel...\n");
 
-    let heap_start: usize = unsafe { core::ptr::addr_of!(_heap_start) as usize };
+    let heap_start: usize =  core::ptr::addr_of!(_heap_start) as usize;
     let mut pmm: pmm::PhysicalMemoryManager = pmm::PhysicalMemoryManager::new(heap_start);
 
     let root_ptr: *mut PageTable = pmm.alloc_page().expect("OOM") as *mut PageTable;
@@ -39,46 +40,17 @@ pub extern "C" fn kmain() -> ! {
 
     root_table.map(&mut pmm, 0x1000_0000, 0x1000_0000, PageTableEntryFlags::RWX);
 
-    let kernel_start: usize = unsafe { core::ptr::addr_of!(_start) as usize };
-    let mut addr: usize = kernel_start;
+    let kernel_start: usize =  core::ptr::addr_of!(_start) as usize ;
+    let bss_end: usize =  core::ptr::addr_of!(_bss_end) as usize;
 
+    let mut addr: usize = kernel_start;
     //Identity mapping
-    while addr < heap_start + 4096 * 100 {
+    while addr < bss_end {
         root_table.map(&mut pmm, addr, addr, PageTableEntryFlags::RWX);
         addr += 4096;
     }
 
     uart::uart_print("Page Tables Built!\n");
-
-    uart::uart_print("Enabling Trap Handling...\n");
-
-    
-    let trap_addr: usize = trap_vector as *const() as usize; // *const() is a raw pointer
-    
-
-    assert!(trap_addr % 4 == 0, "Trap handler must be 4-byte aligned!");
- 
-    
-    unsafe {
-        core::arch::asm!("csrw stvec, {}", in(reg) trap_addr);
-
-        uart::uart_print("stvec initalised!\n");
-        
-        core::arch::asm!("csrrsi x0, sstatus, 2", options(nostack, nomem)); //set SIE (bit 1) as 1
-        
-        uart::uart_print("sstatus initalised!\n");
-        
-        core::arch::asm!(
-            "li t0, 32",
-            "csrrs x0, sie, t0",
-            options(nostack, nomem)
-        ); //set STIE (bit 5) as 1
-
-        uart::uart_print("STIE initialed\n");
-
-    }
-
-    uart::uart_print("Trap Handling Enabled!\n");
 
     uart::uart_print("Enabling MMU...\n");
 
@@ -92,18 +64,48 @@ pub extern "C" fn kmain() -> ! {
 
     uart::uart_print("MMU Enabled! We are still alive!\n");
 
+    uart::uart_print("Enabling Trap Handling...\n");
+
+    
+    let trap_addr: usize = trap_vector as *const() as usize; // *const() is a raw pointer
     
 
+    assert!(trap_addr % 4 == 0, "Trap handler must be 4-byte aligned!");
+ 
+    
+    unsafe {
+        let now: usize;
+        core::arch::asm!("rdtime {}", out(reg) now);
+        
+        let next: usize = now + 1_000_000;
+        core::arch::asm!(
+            "ecall",
+            in("a0") next,
+            in("a6") 0usize,
+            in("a7") 0x54494D45usize, 
+            lateout("a0") _,
+            lateout("a1") _,
+        );
+        core::arch::asm!("csrw stvec, {}", in(reg) trap_addr); 
 
-    // let page1: usize = pmm.alloc_page();
-    // let page2: usize = pmm.alloc_page();
-    // let page3: usize = pmm.alloc_page();
+        uart::uart_print("stvec initalised!\n");
+        
+        core::arch::asm!("csrrsi x0, sstatus, 2", options(nostack, nomem)); //set SIE (bit 1) as 1 (set immediate)
+        
+        uart::uart_print("sstatus initalised!\n");
+        
+        core::arch::asm!(
+            "csrrs x0, sie, {}",
+            in(reg) 32usize,
+            options(nostack, nomem)
+        ); //set STIE (bit 5) as 1
 
-    // if page2 == page1 + 4096 {
-    //     uart::uart_print("Memory Allocation Works!\n");
-    // } else {
-    //     uart::uart_print("Memory Allocation Failed!\n");
-    // }
+        uart::uart_print("STIE initialed\n");
+
+    }
+
+    uart::uart_print("Trap Handling Enabled!\n");
+
 
     let mut last_tick: usize = 0;
     loop {
