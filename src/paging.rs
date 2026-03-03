@@ -1,6 +1,8 @@
 use crate::pmm::PhysicalMemoryManager;
 use core::marker::PhantomData;
 
+use crate::uart;
+
 pub struct PageTableEntryFlags;
 
 impl PageTableEntryFlags {
@@ -10,7 +12,9 @@ impl PageTableEntryFlags {
     pub const EXECUTE: usize = 1 << 3;
     pub const USER: usize = 1 << 4;
 
-    pub const RWX: usize = Self::READ | Self::WRITE | Self::EXECUTE | Self::VALID; //Read/Write/Execute
+    pub const ACCESS: usize = 1 << 6;
+    pub const DIRTY: usize = 1 << 7;
+    pub const RWX: usize = Self::READ | Self::WRITE | Self::EXECUTE | Self::VALID | Self::ACCESS | Self::DIRTY;
     // ... other bits exits, but these are the important ones
 }
 
@@ -38,7 +42,9 @@ impl PageTableEntry {
     }
 
     pub fn physical_address(&self) -> usize {
-        (self.entry >> 10) << 12
+        const MASK: usize = (1usize << 44) -1;
+        let ppn: usize = (self.entry >> 10) & MASK;
+        ppn << 12
     }
 }
 
@@ -103,10 +109,12 @@ impl PageTable {
             .expect("Failed to allocate Level 0 Table");
 
         // 3. Write the Final Entry (Level 0)
-        let entry = &mut table0.entries[vpn0];
-
         // Format: PPN | Flags | Valid
-        let pfn: usize = (pa >> 12) << 10;
-        table0.entries[vpn0].entry = pfn | flags | PageTableEntryFlags::VALID;
+        let ppn: usize = (pa >> 12) << 10;
+        table0.entries[vpn0].entry = ppn | flags | PageTableEntryFlags::VALID;
+
+        uart::uart_print("Page table entry value: ");
+        uart::uart_print_hex(table0.entries[vpn0].entry);
+        uart::uart_print("\n");
     }
 }

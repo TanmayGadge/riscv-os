@@ -44,8 +44,24 @@ pub extern "C" fn kmain() -> ! {
     let bss_end: usize =  core::ptr::addr_of!(_bss_end) as usize;
 
     let mut addr: usize = kernel_start;
+    
+    uart::uart_print("\n");
+    uart::uart_print("Kernel start address: ");
+    uart::uart_print_hex(kernel_start);
+    uart::uart_print("\n");
+
+    uart::uart_print("BSS End Address: ");
+    uart::uart_print_hex(bss_end);
+    uart::uart_print("\n");
+
+    uart::uart_print("Heap Start Address: ");
+    uart::uart_print_hex(heap_start);
+    uart::uart_print("\n");
+
+    uart::uart_print("\n");
+
     //Identity mapping
-    while addr < bss_end {
+    while addr <= bss_end {
         root_table.map(&mut pmm, addr, addr, PageTableEntryFlags::RWX);
         addr += 4096;
     }
@@ -77,15 +93,18 @@ pub extern "C" fn kmain() -> ! {
         let now: usize;
         core::arch::asm!("rdtime {}", out(reg) now);
         
-        let next: usize = now + 1_000_000;
-        core::arch::asm!(
-            "ecall",
-            in("a0") next,
-            in("a6") 0usize,
-            in("a7") 0x54494D45usize, 
-            lateout("a0") _,
-            lateout("a1") _,
-        );
+        let next: usize = now + 10_000_000;
+        // core::arch::asm!(
+        //     "ecall",
+        //     in("a0") next,
+        //     in("a6") 0usize,
+        //     in("a7") 0x54494D45usize, 
+        //     lateout("a0") _,
+        //     lateout("a1") _,
+        // );
+
+        core::arch::asm!("csrw stimecmp, {}", in(reg) next);
+
         core::arch::asm!("csrw stvec, {}", in(reg) trap_addr); 
 
         uart::uart_print("stvec initalised!\n");
@@ -105,6 +124,10 @@ pub extern "C" fn kmain() -> ! {
     }
 
     uart::uart_print("Trap Handling Enabled!\n");
+
+    uart::uart_print("Calling ebreak...\n\n");
+    unsafe{ core::arch::asm!("ebreak"); }
+    uart::uart_print("ebreak resolved!\n\n");
 
 
     let mut last_tick: usize = 0;

@@ -13,8 +13,8 @@ pub fn uart_print(s: &str) {
 }
 
 
-pub fn uart_print_hex(mut val: usize) {
-    let chars = b"0123456789ABCDEF";
+pub fn uart_print_hex(val: usize) {
+    let chars: &[u8; 16] = b"0123456789ABCDEF";
     uart_print("0x");
     for i in (0..16).rev() {
         let nibble = (val >> (i * 4)) & 0xF;
