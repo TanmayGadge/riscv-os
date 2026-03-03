@@ -48,13 +48,12 @@ trap_vector:
 
     addi sp, sp, -272
 
-    sd t0,  32(sp) #original t0
+    sd t0,  32(sp) 
 
     csrr t0, sscratch
-    sd t0, 8(sp) # kernel sp in 8(sp)
+    sd t0, 8(sp) 
 
     sd ra, 0(sp)
-    # sd sp, 8(sp)
     sd gp,  16(sp)
     sd tp,  24(sp)
     
@@ -90,10 +89,8 @@ trap_vector:
     call trap_handler
 
     ld ra, 0(sp)
-    # ld sp, 8(sp)
     ld gp,  16(sp)
     ld tp,  24(sp)
-    # ld t0,  32(sp)
     ld t1,  40(sp)
     ld t2,  48(sp)
     ld s0,  56(sp)
@@ -121,30 +118,11 @@ trap_vector:
     ld t5, 232(sp)
     ld t6, 240(sp)
 
-    # # ld t0, 248(sp)
-    # # csrw sepc, t0
 
-    # ld t0, 8(sp)
-    # ld t1, 32(sp)
 
-    # la t2, trap_stack_top
-    # csrw sscratch, t2
-
-    # # csrw sscratch, t0
-
-    ld t0, trap_stack_top
+    la t0, trap_stack_top
     csrw sscratch, t0
 
-    ld sp, 8(sp)
     ld t0, 32(sp)
-
-
-    addi sp, sp, 272
-
-    # csrrw sp, sscratch, sp
-    # mv sp, t0
-    # mv t0, t1
-
+    ld sp, 8(sp)
     sret
-
-
