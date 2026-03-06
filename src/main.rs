@@ -29,7 +29,8 @@ pub extern "C" fn kmain() -> ! {
     uart::uart_print("Booting Kernel...\n");
 
     let heap_start: usize =  core::ptr::addr_of!(_heap_start) as usize;
-    let mut pmm: pmm::PhysicalMemoryManager = pmm::PhysicalMemoryManager::new(heap_start);
+    const RAM_END: usize = 0x88000000;
+    let mut pmm: pmm::PhysicalMemoryManager = pmm::PhysicalMemoryManager::new(heap_start, RAM_END);
 
     let root_ptr: *mut PageTable = pmm.alloc_page().expect("OOM") as *mut PageTable;
     let root_table: &mut PageTable = unsafe { &mut *root_ptr };
