@@ -2,6 +2,7 @@ use crate::pmm::PhysicalMemoryManager;
 use core::marker::PhantomData;
 
 use crate::uart;
+use spin::Mutex;
 
 pub struct PageTableEntryFlags;
 
@@ -118,3 +119,5 @@ impl PageTable {
         uart::uart_print("\n");
     }
 }
+
+pub static KERNEL_PAGE_TABLE: Mutex<Option<&'static mut PageTable>> = Mutex::new(None);
