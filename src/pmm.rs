@@ -62,11 +62,11 @@ struct HeapAllocator {
     next_va: AtomicUsize,
 }
 
-impl HeapAllocator{
-    pub const fn new(pmm: &'static Mutex<PhysicalMemoryManager> ) -> Self {
+impl HeapAllocator {
+    pub const fn new(pmm: &'static Mutex<PhysicalMemoryManager>) -> Self {
         Self {
             pmm,
-            next_va: AtomicUsize::new(0x4000_0000)
+            next_va: AtomicUsize::new(0x4000_0000),
         }
     }
 }
@@ -104,12 +104,233 @@ unsafe impl GlobalAlloc for HeapAllocator {
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
 
+// struct VMA{
+//     start: usize,
+//     end: usize,
+//     flags: PageTableEntryFlags,
+//     types: usize,
+
+//     next: Option<*mut VMA>
+// }
+struct VMA {
+    start: usize,
+    end: usize,
+    flags: PageTableEntryFlags,
+    types: usize,
+
+    left: Option<*mut VMA>,
+    right: Option<*mut VMA>,
+    height: isize,
+}
+
+impl VMA {
+    fn insert(root: Option<*mut VMA>, node: *mut VMA) -> Option<*mut VMA> {
+        unsafe {
+            if root.is_none() {
+                return Some(node);
+            }
+
+            let r: *mut VMA = root.unwrap();
+
+            if (*node).start < (*r).start {
+                (*r).left = VMA::insert((*r).left, node);
+            } else if (*node).start > (*r).start {
+                (*r).right = VMA::insert((*r).right, node);
+            }
+
+            VMA::update_height(r);
+
+            let balance: isize = VMA::balance_factor(r);
+
+            // left-left insertion case
+            if balance > 1 && (*node).start < (*(*r).left.unwrap()).start {
+                return Some(VMA::rotate_right(r));
+            }
+
+            //right-right insertion case
+            if balance < -1 && (*node).start > (*(*r).right.unwrap()).start {
+                return Some(VMA::rotate_left(r));
+            }
+
+            //left-right insertion case
+            if balance > 1 && (*node).start > (*(*r).left.unwrap()).start {
+                (*r).left = Some(VMA::rotate_left((*r).left.unwrap()));
+                return Some(VMA::rotate_right(r));
+            }
+
+            if balance < -1 && (*node).start < (*(*r).right.unwrap()).start {
+                (*r).right = Some(VMA::rotate_right((*r).right.unwrap()));
+                return Some(VMA::rotate_left(r));
+            }
+
+            Some(r)
+        }
+    }
+
+    fn search(root: Option<*mut VMA>, addr: usize) -> Option<*mut VMA> {
+        unsafe {
+            let mut current: Option<*mut VMA> = root;
+
+            while let Some(node) = current {
+                if addr >= (*node).start && addr < (*node).end {
+                    return Some(node);
+                }
+                if addr > (*node).end {
+                    current = (*node).left;
+                }
+                if addr < (*node).start {
+                    current = (*node).left;
+                }
+            }
+        }
+        None
+    }
+
+    fn delete(root: Option<*mut VMA>, start_addr: usize) -> Option<*mut VMA> {
+        unsafe {
+            if root == None {
+                return None;
+            }
+
+            let r: *mut VMA = root.unwrap();
+            let mut current: *mut VMA = r;
+
+            if start_addr < (*r).start {
+                (*r).left = VMA::delete((*r).left, start_addr);
+                current = (*r).left.unwrap();
+            } else if start_addr > (*r).start {
+                (*r).right = VMA::delete((*r).right, start_addr);
+                current = (*r).right.unwrap();
+            } else {
+                // Node found delete it
+
+                //case 1: no children
+                if VMA::is_leaf(current) {
+                    return None;
+                }
+
+                //case 2: one child
+                if (*current).left == None {
+                    return (*current).right;
+                }
+                if (*current).right == None {
+                    return (*current).left;
+                }
+
+                //case 3: two children
+                let successor:*mut VMA = VMA::find_successor(current).unwrap();
+                current = successor;
+                (*current).right = VMA::delete((*current).right, (*successor).start);
+
+
+            }
+
+            
+            (*current).height = 1 + VMA::height((*current).left).max(VMA::height((*current).right));
+
+            let balance = VMA::height((*current).left) - VMA::height((*current).right);
+
+            if balance > 1 && VMA::balance_factor((*current).left.unwrap()) >=0{
+                return Some(VMA::rotate_right(current));
+            }
+
+            if balance > 1 && VMA::balance_factor((*current).left.unwrap()) < 0{
+                (*current).left = Some(VMA::rotate_left((*current).left.unwrap()));
+                return Some(VMA::rotate_right(current));
+            }
+
+            if balance < -1 && VMA::balance_factor((*current).right.unwrap()) <=0 {
+                return Some(VMA::rotate_left(current));
+            }
+
+            if balance < -1 && VMA::balance_factor((*current).right.unwrap()) > 0{
+                (*current).right = Some(VMA::rotate_right((*current).right));
+                return Some(VMA::rotate_left(current));
+            }
+
+            return Some(current);
+        }
+    }
+
+    fn is_leaf(node: *mut VMA) -> bool {
+        unsafe {
+            if (*node).left == None && (*node).right == None {
+                return true;
+            }
+            false
+        }
+    }
+
+    fn find_successor(node: *mut VMA) -> Option<*mut VMA>{
+        unsafe {
+            let mut current:Option<*mut VMA> = (*node).right; 
+
+            while current != None{
+                current = (*current.unwrap()).left;
+            }
+            return current
+        }
+    }
+
+    fn rotate_right(node: *mut VMA) -> *mut VMA {
+        unsafe {
+            let x: *mut VMA = (*node).left.unwrap();
+            let t2: Option<*mut VMA> = (*x).right;
+
+            (*x).right = Some(node);
+            (*node).right = t2;
+
+            VMA::update_height(x);
+            VMA::update_height(node);
+
+            x
+        }
+    }
+
+    fn rotate_left(node: *mut VMA) -> *mut VMA {
+        unsafe {
+            let x: *mut VMA = (*node).right.unwrap();
+            let t2: Option<*mut VMA> = (*x).left;
+
+            (*x).left = Some(node);
+            (*node).left = t2;
+
+            VMA::update_height(x);
+            VMA::update_height(node);
+
+            x
+        }
+    }
+
+    fn height(node: Option<*mut VMA>) -> isize {
+        match node {
+            Some(n) => unsafe { (*n).height as isize },
+            None => 0,
+        }
+    }
+
+    fn balance_factor(node: *mut VMA) -> isize {
+        unsafe { VMA::height((*node).left) - VMA::height((*node).right) }
+    }
+
+    fn update_height(node: *mut VMA) {
+        unsafe {
+            let lh: isize = VMA::height((*node).left);
+            let rh: isize = VMA::height((*node).right);
+
+            (*node).height = (1 + lh.max(rh)) as isize;
+        }
+    }
+
+    unsafe fn alloc_vrange(size: usize) {}
+    unsafe fn free_vrange(address: usize, size: usize) {}
+}
+
 unsafe impl Send for PhysicalMemoryManager {}
 unsafe impl Sync for PhysicalMemoryManager {}
 
 unsafe impl Send for HeapAllocator {}
 unsafe impl Sync for HeapAllocator {}
-
 
 pub static PMM: Mutex<PhysicalMemoryManager> = Mutex::new(PhysicalMemoryManager::new(0, 0));
 
