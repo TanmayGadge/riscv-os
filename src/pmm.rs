@@ -140,7 +140,7 @@ impl VMA {
 
             VMA::update_height(r);
 
-            let balance: isize = VMA::balance_factor(r);
+            let balance: isize = VMA::balance_factor(Some(r));
 
             // left-left insertion case
             if balance > 1 && (*node).start < (*(*r).left.unwrap()).start {
@@ -193,62 +193,79 @@ impl VMA {
             }
 
             let r: *mut VMA = root.unwrap();
-            let mut current: *mut VMA = r;
+            let mut new_root: Option<*mut VMA> = Some(r);
 
             if start_addr < (*r).start {
+
                 (*r).left = VMA::delete((*r).left, start_addr);
-                current = (*r).left.unwrap();
+
             } else if start_addr > (*r).start {
+
                 (*r).right = VMA::delete((*r).right, start_addr);
-                current = (*r).right.unwrap();
+
             } else {
                 // Node found delete it
 
                 //case 1: no children
-                if VMA::is_leaf(current) {
-                    return None;
+                if VMA::is_leaf(r) {
+                    new_root = None;
+                    // dealloc(r);
                 }
 
                 //case 2: one child
-                if (*current).left == None {
-                    return (*current).right;
+                if (*r).left == None && (*r).right != None{
+                    new_root = (*r).right;
+                  
+
+                    // dealloc(r)
                 }
-                if (*current).right == None {
-                    return (*current).left;
+                if (*r).right == None && (*r).left != None{
+                    new_root = (*r).left;
+                    // dealloc(r)
+
                 }
 
                 //case 3: two children
-                let successor:*mut VMA = VMA::find_successor(current).unwrap();
-                current = successor;
-                (*current).right = VMA::delete((*current).right, (*successor).start);
-
+                if (*r).left != None && (*r).right != None{
+                    let successor:*mut VMA = VMA::find_successor(r).unwrap();
+                    
+                    (*r).start = (*successor).start;
+                    (*r).end = (*successor).end;
+                    (*r).flags = (*successor).flags.clone();
+                    (*r).types = (*successor).types;
+    
+                    (*r).right = VMA::delete((*r).right, (*successor).start);
+                }
 
             }
 
-            
-            (*current).height = 1 + VMA::height((*current).left).max(VMA::height((*current).right));
-
-            let balance = VMA::height((*current).left) - VMA::height((*current).right);
-
-            if balance > 1 && VMA::balance_factor((*current).left.unwrap()) >=0{
-                return Some(VMA::rotate_right(current));
+            if new_root == None{
+                return None;
             }
 
-            if balance > 1 && VMA::balance_factor((*current).left.unwrap()) < 0{
-                (*current).left = Some(VMA::rotate_left((*current).left.unwrap()));
-                return Some(VMA::rotate_right(current));
+            (*new_root.unwrap()).height = 1 + VMA::height((*new_root.unwrap()).left).max(VMA::height((*new_root.unwrap()).right));
+
+            let balance = VMA::height((*new_root.unwrap()).left) - VMA::height((*new_root.unwrap()).right);
+
+            if balance > 1 && VMA::balance_factor((*new_root.unwrap()).left) >=0{
+                return Some(VMA::rotate_right(new_root.unwrap()));
             }
 
-            if balance < -1 && VMA::balance_factor((*current).right.unwrap()) <=0 {
-                return Some(VMA::rotate_left(current));
+            if balance > 1 && VMA::balance_factor((*new_root.unwrap()).left) < 0{
+                (*new_root.unwrap()).left = Some(VMA::rotate_left((*new_root.unwrap()).left.unwrap()));
+                return Some(VMA::rotate_right(new_root.unwrap()));
             }
 
-            if balance < -1 && VMA::balance_factor((*current).right.unwrap()) > 0{
-                (*current).right = Some(VMA::rotate_right((*current).right));
-                return Some(VMA::rotate_left(current));
+            if balance < -1 && VMA::balance_factor((*new_root.unwrap()).right) <=0 {
+                return Some(VMA::rotate_left(new_root.unwrap()));
             }
 
-            return Some(current);
+            if balance < -1 && VMA::balance_factor((*new_root.unwrap()).right) > 0{
+                (*new_root.unwrap()).right = Some(VMA::rotate_right((*new_root.unwrap()).right.unwrap()));
+                return Some(VMA::rotate_left(new_root.unwrap()));
+            }
+
+            return new_root;
         }
     }
 
@@ -265,8 +282,16 @@ impl VMA {
         unsafe {
             let mut current:Option<*mut VMA> = (*node).right; 
 
-            while current != None{
-                current = (*current.unwrap()).left;
+            if current == None{
+                return None;
+            }
+
+            while let Some(curr_ptr) = current{
+                if let Some(left_ptr) = (*curr_ptr).left{
+                    current = Some(left_ptr);
+                }else{
+                    break;
+                }
             }
             return current
         }
@@ -309,8 +334,11 @@ impl VMA {
         }
     }
 
-    fn balance_factor(node: *mut VMA) -> isize {
-        unsafe { VMA::height((*node).left) - VMA::height((*node).right) }
+    fn balance_factor(node: Option<*mut VMA>) -> isize {
+        if node == None{
+            return 0;
+        }
+        unsafe { VMA::height((*node.unwrap()).left) - VMA::height((*node.unwrap()).right) }
     }
 
     fn update_height(node: *mut VMA) {

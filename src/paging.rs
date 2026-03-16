@@ -2,8 +2,9 @@ use crate::pmm::PhysicalMemoryManager;
 use core::marker::PhantomData;
 
 use crate::uart;
-use spin::Mutex;
+use spin::{Mutex, MutexGuard};
 
+#[derive(Clone)]
 pub struct PageTableEntryFlags;
 
 impl PageTableEntryFlags {
@@ -15,14 +16,15 @@ impl PageTableEntryFlags {
 
     pub const ACCESS: usize = 1 << 6;
     pub const DIRTY: usize = 1 << 7;
-    pub const RWX: usize = Self::READ | Self::WRITE | Self::EXECUTE | Self::VALID | Self::ACCESS | Self::DIRTY;
+    pub const RWX: usize =
+        Self::READ | Self::WRITE | Self::EXECUTE | Self::VALID | Self::ACCESS | Self::DIRTY;
     // ... other bits exits, but these are the important ones
 }
 
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct PageTableEntry {
-   pub entry: usize, // PTE is just a 64-bit integer
+    pub entry: usize, // PTE is just a 64-bit integer
 }
 
 impl PageTableEntry {
@@ -42,8 +44,12 @@ impl PageTableEntry {
         (self.entry & PageTableEntryFlags::WRITE) != 0
     }
 
+    pub fn is_executable(&self) -> bool {
+        (self.entry & PageTableEntryFlags::EXECUTE) != 0
+    }
+
     pub fn physical_address(&self) -> usize {
-        const MASK: usize = (1usize << 44) -1;
+        const MASK: usize = (1usize << 44) - 1;
         let ppn: usize = (self.entry >> 10) & MASK;
         ppn << 12
     }
@@ -62,24 +68,21 @@ impl PageTable {
         }
     }
 
-
     pub fn next_table_create(
-        &mut self, 
-        index: usize, 
-        allocator: &mut PhysicalMemoryManager)
-        -> Option<&mut PageTable> {
-
+        &mut self,
+        index: usize,
+        allocator: &mut PhysicalMemoryManager,
+    ) -> Option<&mut PageTable> {
         let entry: &mut PageTableEntry = &mut self.entries[index];
 
         if entry.is_valid() {
             let table_ptr: *mut PageTable = entry.physical_address() as *mut PageTable;
             unsafe { Some(&mut *table_ptr) }
-
-        }else{
+        } else {
             let new_page_addr: usize = allocator.alloc_page()?;
-            let new_table: &mut PageTable = unsafe{ &mut *(new_page_addr as *mut PageTable)};
+            let new_table: &mut PageTable = unsafe { &mut *(new_page_addr as *mut PageTable) };
 
-            new_table.entries = [PageTableEntry {entry: 0}; 512];
+            new_table.entries = [PageTableEntry { entry: 0 }; 512];
             let flags: usize = PageTableEntryFlags::VALID;
             let pfn: usize = (new_page_addr >> 12) << 10;
             entry.entry = pfn | flags;
@@ -118,6 +121,62 @@ impl PageTable {
         uart::uart_print_hex(table0.entries[vpn0].entry);
         uart::uart_print("\n");
     }
+
+    pub fn walk(&mut self, va: usize) -> Option<usize> {
+        let vpn2: usize = (va >> 30) & 0x1FF;
+        let vpn1: usize = (va >> 21) & 0x1FF;
+        let vpn0: usize = (va >> 12) & 0x1FF;
+
+        let offset: usize = va & 0xFFF;
+
+        let l2_entry: PageTableEntry = self.entries[vpn2];
+        let mut ppn: usize = PageTableEntry::physical_address(&l2_entry);
+
+        if !PageTableEntry::is_valid(&l2_entry) {
+            return None;
+        }
+
+        if PageTableEntry::is_readable(&l2_entry)
+            | PageTableEntry::is_writeable(&l2_entry)
+            | PageTableEntry::is_executable(&l2_entry)
+        {
+            return Some(ppn | offset);
+        } else {
+            let l1_table: *mut PageTable = ppn as *mut PageTable;
+            let l1_entry: PageTableEntry = unsafe { (*l1_table).entries[vpn1] };
+
+            if !PageTableEntry::is_valid(&l1_entry) {
+                return None;
+            }
+
+            if PageTableEntry::is_readable(&l1_entry)
+                | PageTableEntry::is_writeable(&l1_entry)
+                | PageTableEntry::is_executable(&l1_entry)
+            {
+                ppn = PageTableEntry::physical_address(&l1_entry);
+                return Some(ppn | offset);
+            } else {
+                let l0_table: *mut PageTable = ppn as *mut PageTable;
+                let l0_entry: PageTableEntry = unsafe { (*l0_table).entries[vpn0] };
+
+                if !PageTableEntry::is_valid(&l0_entry){
+                    return None;
+                }
+
+                if PageTableEntry::is_readable(&l0_entry)
+                    | PageTableEntry::is_writeable(&l0_entry)
+                    | PageTableEntry::is_executable(&l0_entry)
+                {
+                    ppn = PageTableEntry::physical_address(&l0_entry);
+                    return Some(ppn | offset);
+                }else{
+                    uart::uart_print("Page Fault!: The Virtual Address is not mapped to any Physical Address.");
+                }
+            }
+        }
+        None //Replace identity mapping with offset mapping
+    }
+
 }
 
 pub static KERNEL_PAGE_TABLE: Mutex<Option<&'static mut PageTable>> = Mutex::new(None);

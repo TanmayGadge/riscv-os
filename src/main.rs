@@ -95,6 +95,7 @@ pub extern "C" fn kmain() -> ! {
     }
 
     *KERNEL_PAGE_TABLE.lock() = Some(root_table);
+    
 
     uart::uart_print("Page Tables Built!\n");
 
