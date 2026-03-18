@@ -1,10 +1,30 @@
+use alloc::boxed::Box;
 use core::{
     alloc::{GlobalAlloc, Layout},
+    ptr::null_mut,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::paging::{KERNEL_PAGE_TABLE, PageTable, PageTableEntryFlags};
+use crate::paging::{self, KERNEL_PAGE_TABLE, PageTable, PageTableEntry, PageTableEntryFlags};
 use spin::{Mutex, MutexGuard};
+
+static mut VMA_ROOT: Option<*mut VMA> = None;
+static RAM_END: usize = 0x88000000;
+
+static mut VMA_POOL: [VMA; 1024] = [VMA {
+    start: 0,
+    end: 0,
+    flags: None,
+    types: None,
+    left: None,
+    right: None,
+    height: 0,
+}; 1024];
+static mut VMA_FREE_LIST_HEAD: *mut VMA = null_mut();
+
+unsafe extern "C" {
+    unsafe static _heap_start: u8;
+}
 
 struct FreePage {
     next: Option<*mut FreePage>,
@@ -104,19 +124,13 @@ unsafe impl GlobalAlloc for HeapAllocator {
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
 
-// struct VMA{
-//     start: usize,
-//     end: usize,
-//     flags: PageTableEntryFlags,
-//     types: usize,
-
-//     next: Option<*mut VMA>
-// }
+#[derive(Copy, Clone)]
 struct VMA {
+    //AVL tree
     start: usize,
     end: usize,
-    flags: PageTableEntryFlags,
-    types: usize,
+    flags: Option<PageTableEntryFlags>,
+    types: Option<usize>,
 
     left: Option<*mut VMA>,
     right: Option<*mut VMA>,
@@ -124,6 +138,47 @@ struct VMA {
 }
 
 impl VMA {
+    pub const fn new(start: usize, end: usize) -> Self {
+        Self {
+            start,
+            end,
+            flags: None,
+            types: None,
+            left: None,
+            right: None,
+            height: 0,
+        }
+    }
+
+    // Slab Allocator
+    fn alloc_vma(start: usize, end: usize) -> *mut VMA {
+        unsafe {
+            if VMA_FREE_LIST_HEAD == null_mut() {
+                return null_mut();
+            }
+
+            let vma: *mut VMA = VMA_FREE_LIST_HEAD;
+            (*vma).start = start;
+            (*vma).end = end;
+
+            VMA_FREE_LIST_HEAD = (*vma).left.unwrap_or(null_mut());
+            vma
+        }
+    }
+
+    fn free_vma(vma: *mut VMA) {
+        unsafe {
+            (*vma).start = 0;
+            (*vma).end = 0;
+            (*vma).right = None;
+            (*vma).flags = None;
+            (*vma).height = 0;
+
+            (*vma).left = Some(VMA_FREE_LIST_HEAD);
+            VMA_FREE_LIST_HEAD = vma;
+        }
+    }
+
     fn insert(root: Option<*mut VMA>, node: *mut VMA) -> Option<*mut VMA> {
         unsafe {
             if root.is_none() {
@@ -196,72 +251,68 @@ impl VMA {
             let mut new_root: Option<*mut VMA> = Some(r);
 
             if start_addr < (*r).start {
-
                 (*r).left = VMA::delete((*r).left, start_addr);
-
             } else if start_addr > (*r).start {
-
                 (*r).right = VMA::delete((*r).right, start_addr);
-
             } else {
                 // Node found delete it
 
                 //case 1: no children
                 if VMA::is_leaf(r) {
                     new_root = None;
-                    // dealloc(r);
+                    VMA::free_vma(r);
                 }
 
                 //case 2: one child
-                if (*r).left == None && (*r).right != None{
+                if (*r).left == None && (*r).right != None {
                     new_root = (*r).right;
-                  
-
-                    // dealloc(r)
+                    VMA::free_vma(r);
                 }
-                if (*r).right == None && (*r).left != None{
+                if (*r).right == None && (*r).left != None {
                     new_root = (*r).left;
-                    // dealloc(r)
-
+                    VMA::free_vma(r);
                 }
 
                 //case 3: two children
-                if (*r).left != None && (*r).right != None{
-                    let successor:*mut VMA = VMA::find_successor(r).unwrap();
-                    
+                if (*r).left != None && (*r).right != None {
+                    let successor: *mut VMA = VMA::find_successor(r).unwrap();
+
                     (*r).start = (*successor).start;
                     (*r).end = (*successor).end;
                     (*r).flags = (*successor).flags.clone();
                     (*r).types = (*successor).types;
-    
+
                     (*r).right = VMA::delete((*r).right, (*successor).start);
                 }
-
             }
 
-            if new_root == None{
+            if new_root == None {
                 return None;
             }
 
-            (*new_root.unwrap()).height = 1 + VMA::height((*new_root.unwrap()).left).max(VMA::height((*new_root.unwrap()).right));
+            (*new_root.unwrap()).height = 1 + VMA::height((*new_root.unwrap()).left)
+                .max(VMA::height((*new_root.unwrap()).right));
 
-            let balance = VMA::height((*new_root.unwrap()).left) - VMA::height((*new_root.unwrap()).right);
+            let balance =
+                VMA::height((*new_root.unwrap()).left) - VMA::height((*new_root.unwrap()).right);
 
-            if balance > 1 && VMA::balance_factor((*new_root.unwrap()).left) >=0{
+            if balance > 1 && VMA::balance_factor((*new_root.unwrap()).left) >= 0 {
                 return Some(VMA::rotate_right(new_root.unwrap()));
             }
 
-            if balance > 1 && VMA::balance_factor((*new_root.unwrap()).left) < 0{
-                (*new_root.unwrap()).left = Some(VMA::rotate_left((*new_root.unwrap()).left.unwrap()));
+            if balance > 1 && VMA::balance_factor((*new_root.unwrap()).left) < 0 {
+                (*new_root.unwrap()).left =
+                    Some(VMA::rotate_left((*new_root.unwrap()).left.unwrap()));
                 return Some(VMA::rotate_right(new_root.unwrap()));
             }
 
-            if balance < -1 && VMA::balance_factor((*new_root.unwrap()).right) <=0 {
+            if balance < -1 && VMA::balance_factor((*new_root.unwrap()).right) <= 0 {
                 return Some(VMA::rotate_left(new_root.unwrap()));
             }
 
-            if balance < -1 && VMA::balance_factor((*new_root.unwrap()).right) > 0{
-                (*new_root.unwrap()).right = Some(VMA::rotate_right((*new_root.unwrap()).right.unwrap()));
+            if balance < -1 && VMA::balance_factor((*new_root.unwrap()).right) > 0 {
+                (*new_root.unwrap()).right =
+                    Some(VMA::rotate_right((*new_root.unwrap()).right.unwrap()));
                 return Some(VMA::rotate_left(new_root.unwrap()));
             }
 
@@ -278,22 +329,22 @@ impl VMA {
         }
     }
 
-    fn find_successor(node: *mut VMA) -> Option<*mut VMA>{
+    fn find_successor(node: *mut VMA) -> Option<*mut VMA> {
         unsafe {
-            let mut current:Option<*mut VMA> = (*node).right; 
+            let mut current: Option<*mut VMA> = (*node).right;
 
-            if current == None{
+            if current == None {
                 return None;
             }
 
-            while let Some(curr_ptr) = current{
-                if let Some(left_ptr) = (*curr_ptr).left{
+            while let Some(curr_ptr) = current {
+                if let Some(left_ptr) = (*curr_ptr).left {
                     current = Some(left_ptr);
-                }else{
+                } else {
                     break;
                 }
             }
-            return current
+            return current;
         }
     }
 
@@ -335,7 +386,7 @@ impl VMA {
     }
 
     fn balance_factor(node: Option<*mut VMA>) -> isize {
-        if node == None{
+        if node == None {
             return 0;
         }
         unsafe { VMA::height((*node.unwrap()).left) - VMA::height((*node.unwrap()).right) }
@@ -350,8 +401,107 @@ impl VMA {
         }
     }
 
-    unsafe fn alloc_vrange(size: usize) {}
-    unsafe fn free_vrange(address: usize, size: usize) {}
+    unsafe fn alloc_vrange(requested_size: usize) -> Option<usize> {
+        let root: Option<*mut VMA> = unsafe { VMA_ROOT };
+        let mut found_address: Option<usize> = None;
+
+        let mut last_end: usize = unsafe { _heap_start as usize };
+
+        if root == None {
+            // let new_vma: Box<VMA> = Box::new(VMA::new(last_end, last_end + requested_size));
+            let new_vma: *mut VMA = VMA::alloc_vma(last_end, last_end + requested_size);
+            unsafe {
+                VMA_ROOT = VMA::insert(root, new_vma);
+            }
+            return Some(last_end);
+        }
+
+        //In-order traversal
+        VMA::find_hole_recursive(root, requested_size, &mut last_end, &mut found_address);
+
+        if found_address == None {
+            if (RAM_END - last_end) >= requested_size {
+                found_address = Some(last_end);
+
+                let new_vma: *mut VMA = VMA::alloc_vma(
+                    found_address.unwrap(),
+                    found_address.unwrap() + requested_size,
+                );
+                unsafe {
+                    VMA_ROOT = VMA::insert(root, new_vma);
+                }
+                return Some(last_end);
+            }
+        } else {
+            let new_vma = VMA::alloc_vma(
+                found_address.unwrap(),
+                found_address.unwrap() + requested_size,
+            );
+            unsafe {
+                VMA_ROOT = VMA::insert(root, new_vma);
+            }
+            return found_address;
+        }
+
+        found_address
+    }
+
+    fn find_hole_recursive(
+        current_node: Option<*mut VMA>,
+        requested_size: usize,
+        last_end: &mut usize,
+        found_address: &mut Option<usize>,
+    ) {
+        if current_node == None || !found_address.is_none() {
+            return;
+        }
+
+        VMA::find_hole_recursive(
+            unsafe { (*current_node.unwrap()).left },
+            requested_size,
+            last_end,
+            found_address,
+        );
+
+        if *found_address == None {
+            if (unsafe { (*current_node.unwrap()).start } - *last_end) >= requested_size {
+                *found_address = Some(*last_end);
+                return;
+            }
+            *last_end = unsafe { (*current_node.unwrap()).end };
+        }
+
+        VMA::find_hole_recursive(
+            unsafe { (*current_node.unwrap()).right },
+            requested_size,
+            last_end,
+            found_address,
+        );
+    }
+
+    unsafe fn free_vrange(address: usize, size: usize) {
+        unsafe {
+            let vma: *mut VMA = VMA::search(VMA_ROOT, address).unwrap();
+
+            if address != (*vma).start {
+                //Handle Partial Frees
+                return;
+            }
+
+            let mut i: usize = (*vma).start;
+
+            let mut guard: MutexGuard<'_, Option<&'static mut PageTable>> = KERNEL_PAGE_TABLE.lock();
+
+            let root_table: &mut PageTable = guard
+                .as_mut()
+                .map(|ptr|&mut **ptr)
+                .expect("KERNEL_PAGE_TABLE not initialized");
+
+            while i <= (*vma).end {
+                let page_entry: *mut PageTableEntry = PageTable::entry_walk(root_table, address);
+            }
+        }
+    }
 }
 
 unsafe impl Send for PhysicalMemoryManager {}

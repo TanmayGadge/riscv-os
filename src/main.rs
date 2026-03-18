@@ -34,7 +34,7 @@ pub extern "C" fn kmain() -> ! {
     uart::uart_print("Booting Kernel...\n");
 
     let heap_start: usize = core::ptr::addr_of!(_heap_start) as usize;
-    const RAM_END: usize = 0x88000000;
+    pub const RAM_END: usize = 0x88000000;
 
     {
         let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = PMM.lock();
