@@ -36,6 +36,10 @@ pub extern "C" fn kmain() -> ! {
     let heap_start: usize = core::ptr::addr_of!(_heap_start) as usize;
     pub const RAM_END: usize = 0x88000000;
 
+    unsafe{
+        pmm::init_vma_pool();
+    }
+
     {
         let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = PMM.lock();
         *pmm_lock = PhysicalMemoryManager::new(heap_start, RAM_END);
@@ -74,7 +78,7 @@ pub extern "C" fn kmain() -> ! {
         let mut addr: usize = kernel_start;
 
         //Identity mapping
-        while addr <= map_limit {
+        while addr <= RAM_END {
             root_table.map(&mut pmm_lock, addr, addr, PageTableEntryFlags::RWX);
             addr += 4096;
         }
@@ -111,11 +115,21 @@ pub extern "C" fn kmain() -> ! {
 
     uart::uart_print("MMU Enabled! We are still alive!\n");
 
+    uart::uart_print("Starting Dynamic memory allocation test...\n");
+    uart::uart_print("Initializing a Vec<usize>...\n");
+
     let mut test_vec: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
-    for i in 0..1000 {
+    uart::uart_print("Vector initialized!\n");
+    uart::uart_print("Inserting Elements...\n");
+
+    for i in 0..100 {
+        uart::uart_print("Enterd the loop!\n");
         test_vec.push(i);
+        uart::uart_print("Pushed: ");
+        uart::uart_print_hex(i);
+        uart::uart_print(", ");
     }
-    uart::uart_print("Heap test: Vector pushed 1000 elements successfully!\n");
+    uart::uart_print("\nHeap test: Vector pushed 100 elements successfully!\n");
 
     uart::uart_print("Enabling Trap Handling...\n");
 

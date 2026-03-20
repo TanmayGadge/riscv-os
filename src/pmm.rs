@@ -2,14 +2,19 @@ use alloc::boxed::Box;
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr::null_mut,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize},
 };
 
 use crate::paging::{self, KERNEL_PAGE_TABLE, PageTable, PageTableEntry, PageTableEntryFlags};
+use crate::uart;
 use spin::{Mutex, MutexGuard};
 
 static mut VMA_ROOT: Option<*mut VMA> = None;
 static RAM_END: usize = 0x88000000;
+
+pub struct VmaPtr(*mut VMA);
+unsafe impl Send for VmaPtr {}
+unsafe impl Sync for VmaPtr {}
 
 static mut VMA_POOL: [VMA; 1024] = [VMA {
     start: 0,
@@ -20,7 +25,22 @@ static mut VMA_POOL: [VMA; 1024] = [VMA {
     right: None,
     height: 0,
 }; 1024];
-static mut VMA_FREE_LIST_HEAD: *mut VMA = null_mut();
+static VMA_FREE_LIST_HEAD: Mutex<VmaPtr> = Mutex::new(VmaPtr(null_mut()));
+
+pub fn init_vma_pool() {
+    unsafe {
+        for i in 0..1023 {
+            let current: *mut VMA = &mut VMA_POOL[i] as *mut VMA;
+            let next: *mut VMA = &mut VMA_POOL[i + 1] as *mut VMA;
+
+            (*current).left = Some(next);
+        }
+        let last = &mut VMA_POOL[1023] as *mut VMA;
+        (*last).left = None;
+
+        *VMA_FREE_LIST_HEAD.lock() = VmaPtr(&mut VMA_POOL[0] as *mut VMA);
+    }
+}
 
 unsafe extern "C" {
     unsafe static _heap_start: u8;
@@ -69,6 +89,7 @@ impl PhysicalMemoryManager {
     }
 
     pub fn dealloc_page(&mut self, ptr: usize) {
+        assert!(ptr % 4096 == 0);
         let page_ptr: *mut FreePage = ptr as *mut FreePage;
         unsafe {
             (*page_ptr).next = self.free_list;
@@ -96,9 +117,12 @@ unsafe impl GlobalAlloc for HeapAllocator {
         let size: usize = layout.size();
         let pages_needed: usize = (size + 4095) / 4096;
 
-        let start_va: usize = self
-            .next_va
-            .fetch_add(pages_needed * 4096, Ordering::SeqCst);
+        // let start_va: usize = self
+        //     .next_va
+        //     .fetch_add(pages_needed * 4096, Ordering::SeqCst);
+
+        let start_va: usize =
+            unsafe { VMA::alloc_vrange(pages_needed * 4096).expect("Coudn't allocate virtual memory.") };
 
         let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = self.pmm.lock();
         let mut pt_lock: MutexGuard<'_, Option<&'static mut PageTable>> = KERNEL_PAGE_TABLE.lock();
@@ -121,7 +145,12 @@ unsafe impl GlobalAlloc for HeapAllocator {
         start_va as *mut u8
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        unsafe {
+            let address: usize = (*_ptr) as usize;
+            VMA::free_vrange(address, _layout.size());
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -139,6 +168,7 @@ struct VMA {
 
 impl VMA {
     pub const fn new(start: usize, end: usize) -> Self {
+        assert!(start % 4096 == 0 && end % 4096 == 0);
         Self {
             start,
             end,
@@ -150,18 +180,32 @@ impl VMA {
         }
     }
 
+    fn total_pages(size: usize) -> usize {
+        unsafe {
+            return (size + 4095) / 4096;
+        }
+    }
+
     // Slab Allocator
     fn alloc_vma(start: usize, end: usize) -> *mut VMA {
-        unsafe {
-            if VMA_FREE_LIST_HEAD == null_mut() {
+        unsafe {  
+            assert!(start % 4096 == 0 && end % 4096 == 0);
+            let mut gaurd: MutexGuard<'_, VmaPtr> = VMA_FREE_LIST_HEAD.lock();
+
+
+            // let mut head: *mut VMA = gaurd.as_mut().map(|ptr| &mut *ptr as *mut VMA).unwrap();
+            let head: *mut VMA = gaurd.0;
+            // let mut head= VMA_FREE_LIST_HEAD.lock().unwrap();
+
+            if head == null_mut() {
                 return null_mut();
             }
 
-            let vma: *mut VMA = VMA_FREE_LIST_HEAD;
+            let vma: *mut VMA = head;
             (*vma).start = start;
             (*vma).end = end;
 
-            VMA_FREE_LIST_HEAD = (*vma).left.unwrap_or(null_mut());
+            *gaurd = VmaPtr((*vma).left.unwrap_or(null_mut()));
             vma
         }
     }
@@ -174,8 +218,10 @@ impl VMA {
             (*vma).flags = None;
             (*vma).height = 0;
 
-            (*vma).left = Some(VMA_FREE_LIST_HEAD);
-            VMA_FREE_LIST_HEAD = vma;
+            let mut gaurd: MutexGuard<'_, VmaPtr> = VMA_FREE_LIST_HEAD.lock();
+
+            (*vma).left = Some(gaurd.0);
+            *gaurd = VmaPtr(vma);
         }
     }
 
@@ -481,24 +527,108 @@ impl VMA {
 
     unsafe fn free_vrange(address: usize, size: usize) {
         unsafe {
-            let vma: *mut VMA = VMA::search(VMA_ROOT, address).unwrap();
+            let mut aligned_virtual_address = address;
+            
+            if address & 0xFFF != 0 {
+                aligned_virtual_address = address & !0xFFF; // round down to nearnest 4KB boundary
+            }
 
-            if address != (*vma).start {
-                //Handle Partial Frees
+            let range: usize = aligned_virtual_address + size;
+
+            let vma: *mut VMA = VMA::search(VMA_ROOT, aligned_virtual_address).unwrap();
+            let number_of_pages = VMA::total_pages(size);
+
+            if range > (*vma).end {
+                uart::uart_print("Range to be freed spans multiple VMAs.");
                 return;
             }
 
-            let mut i: usize = (*vma).start;
-
-            let mut guard: MutexGuard<'_, Option<&'static mut PageTable>> = KERNEL_PAGE_TABLE.lock();
+            let mut guard: MutexGuard<'_, Option<&'static mut PageTable>> =
+                KERNEL_PAGE_TABLE.lock();
 
             let root_table: &mut PageTable = guard
                 .as_mut()
-                .map(|ptr|&mut **ptr)
+                .map(|ptr| &mut **ptr)
                 .expect("KERNEL_PAGE_TABLE not initialized");
+            let mut i: usize = (*vma).start;
 
-            while i <= (*vma).end {
-                let page_entry: *mut PageTableEntry = PageTable::entry_walk(root_table, address);
+            if aligned_virtual_address == (*vma).start && range == (*vma).end {
+                // Free entire VMA
+                PageTable::unmap_range(root_table, aligned_virtual_address, size);
+                for i in 0..number_of_pages {
+                    let page_entry: *mut PageTableEntry =
+                        PageTable::entry_walk(root_table, aligned_virtual_address);
+
+                    if page_entry == null_mut() {
+                        return;
+                    }
+
+                    let physical_address: usize = PageTableEntry::physical_address(&(*page_entry));
+                    PMM.lock().dealloc_page(physical_address);
+                    aligned_virtual_address += 4096;
+                }
+
+                core::arch::asm!("sfence.vma");
+                VMA::free_vma(vma);
+                return;
+            } else {
+                //Handle Partial deallocations
+
+                //Case 1: Free first N pages
+                if range < (*vma).end && aligned_virtual_address == (*vma).start {
+                    PageTable::unmap_range(root_table, aligned_virtual_address, size);
+                    for i in 0..number_of_pages {
+                        let page_entry: *mut PageTableEntry =
+                            PageTable::entry_walk(root_table, aligned_virtual_address);
+                        let physical_address = PageTableEntry::physical_address(&(*page_entry));
+
+                        PMM.lock().dealloc_page(physical_address);
+                        aligned_virtual_address += 4096;
+                    }
+                    (*vma).start = aligned_virtual_address;
+                    core::arch::asm!("sfence.vma");
+                    return;
+                }
+
+                //Case 2: Free last N pages
+                if aligned_virtual_address > (*vma).start && range == (*vma).end {
+                    PageTable::unmap_range(root_table, aligned_virtual_address, size);
+                    (*vma).end = aligned_virtual_address;
+
+                    for i in 0..number_of_pages {
+                        let page_entry: *mut PageTableEntry =
+                            PageTable::entry_walk(root_table, aligned_virtual_address);
+                        let physical_address = PageTableEntry::physical_address(&(*page_entry));
+
+                        PMM.lock().dealloc_page(physical_address);
+                        aligned_virtual_address += 4096;
+                    }
+                    core::arch::asm!("sfence.vma");
+                }
+
+                //Case 3: Free middle N pages
+                if aligned_virtual_address > (*vma).start
+                    && aligned_virtual_address < (*vma).end
+                    && range < (*vma).end
+                {
+                    PageTable::unmap_range(root_table, aligned_virtual_address, size);
+
+                    let new_vma: *mut VMA = VMA::alloc_vma(range, (*vma).end);
+
+                    (*vma).end = aligned_virtual_address;
+
+                    for i in 0..number_of_pages {
+                        let page_entry: *mut PageTableEntry =
+                            PageTable::entry_walk(root_table, aligned_virtual_address);
+                        let physical_address = PageTableEntry::physical_address(&(*page_entry));
+
+                        PMM.lock().dealloc_page(physical_address);
+                        aligned_virtual_address += 4096;
+                    }
+
+                    VMA_ROOT = VMA::insert(VMA_ROOT, new_vma);
+                    core::arch::asm!("sfence.vma");
+                }
             }
         }
     }
