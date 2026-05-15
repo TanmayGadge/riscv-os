@@ -5,3 +5,6 @@ target = "riscv64gc-unknown-none-elf"
 rustflags = [
   "-C", "link-arg=-Tlinker.ld"
 ]
+
+[alias]
+run-os = "!sh -c 'cargo build && qemu-system-riscv64 -machine virt -nographic -serial mon:stdio -bios default -kernel target/riscv64gc-unknown-none-elf/debug/OS'"

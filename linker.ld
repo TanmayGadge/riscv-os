@@ -1,33 +1,37 @@
 OUTPUT_ARCH(riscv)
-ENTRY(_start)
+ENTRY(phys_start)
+
+KERNEL_OFFSET = 0xFFFFFFFF00000000;
+phys_start = _start - KERNEL_OFFSET;
 
 SECTIONS
 {
-    . = 0x80200000; /*Set location counter for openSBI*/
+    . = 0x80200000 + KERNEL_OFFSET;
 
-    .text : { /*Executable Code*/
+    .text : AT(0x80200000) {
         *(.text.entry)
         *(.text .text.*)
     }
 
-    .rodata : {
+    .rodata : AT(ADDR(.rodata) - KERNEL_OFFSET) {
         *(.rodata .rodata.*)
     }
 
-    .data : {
+    .data : AT(ADDR(.data) - KERNEL_OFFSET) {
         *(.data .data.*)
     }
 
-    .bss : {
-        *(.bss .bss.stack)
-        *(.bss .bss.trap_stack)
-        *(.bss .bss.*)
+    .bss : AT(ADDR(.bss) - KERNEL_OFFSET) {
+        . = ALIGN(8);
+        _bss_start = .;
+        *(.bss.stack)
+        *(.bss.trap_stack)
+        *(.bss .bss.*)         
         *(COMMON)
         . = ALIGN(4096);
         _bss_end = .;
     }
 
-    . = ALIGN(4096); /*Ensure heap starts on a fresh page*/
-
+    . = ALIGN(4096);
     _heap_start = .;
 }

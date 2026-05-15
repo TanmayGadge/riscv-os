@@ -1,4 +1,4 @@
-use crate::pmm::{self, PhysicalMemoryManager, PMM};
+use crate::pmm::{self, PMM, PhysicalMemoryManager};
 
 use crate::uart;
 
@@ -82,7 +82,18 @@ impl PageTable {
             let new_page_addr: usize = allocator.alloc_page()?;
             let new_table: &mut PageTable = unsafe { &mut *(new_page_addr as *mut PageTable) };
 
-            new_table.entries = [PageTableEntry { entry: 0 }; 512];
+            // new_table.entries = [PageTableEntry { entry: 0 }; 512];
+
+            for i in 0..512 {
+                // new_table.entries[i] = PageTableEntry {entry: 0};
+                unsafe {
+                    core::ptr::write_volatile(
+                        &mut new_table.entries[i],
+                        PageTableEntry { entry: 0 },
+                    );
+                }
+            }
+
             let flags: usize = PageTableEntryFlags::VALID;
             let pfn: usize = (new_page_addr >> 12) << 10;
             entry.entry = pfn | flags;
@@ -117,92 +128,93 @@ impl PageTable {
         let ppn: usize = (pa >> 12) << 10;
         table0.entries[vpn0].entry = ppn | flags | PageTableEntryFlags::VALID;
 
-        uart::uart_print("Page table entry value: ");
-        uart::uart_print_hex(table0.entries[vpn0].entry);
-        uart::uart_print("\n");
+        //Remove uart_print to prevent noise and issues during page table build phase
+        // uart::uart_print("Page table entry value: ");
+        // uart::uart_print_hex(table0.entries[vpn0].entry);
+        // uart::uart_print("\n");
     }
 
-    pub fn entry_walk(&mut self, va: usize) -> *mut PageTableEntry {
-        let vpn2: usize = (va >> 30) & 0x1FF;
-        let vpn1: usize = (va >> 21) & 0x1FF;
-        let vpn0: usize = (va >> 12) & 0x1FF;
+   pub fn entry_walk(&mut self, va: usize) -> *mut PageTableEntry {
+    let vpn2: usize = (va >> 30) & 0x1FF;
+    let vpn1: usize = (va >> 21) & 0x1FF;
+    let vpn0: usize = (va >> 12) & 0x1FF;
 
-        let offset: usize = va & 0xFFF;
+    let l2_entry: PageTableEntry = self.entries[vpn2];
+    let mut ppn: usize = PageTableEntry::physical_address(&l2_entry);
 
-        let l2_entry: PageTableEntry = self.entries[vpn2];
-        let mut ppn: usize = PageTableEntry::physical_address(&l2_entry);
+    if !PageTableEntry::is_valid(&l2_entry) {
+        return 0 as *mut PageTableEntry;
+    }
 
-        if !PageTableEntry::is_valid(&l2_entry) {
+    if PageTableEntry::is_readable(&l2_entry)
+        | PageTableEntry::is_writeable(&l2_entry)
+        | PageTableEntry::is_executable(&l2_entry)
+    {
+        return &mut self.entries[vpn2] as *mut PageTableEntry;
+    } else {
+        let l1_table: *mut PageTable = ppn as *mut PageTable;
+        let l1_entry: PageTableEntry = unsafe { (*l1_table).entries[vpn1] };
+
+        if !PageTableEntry::is_valid(&l1_entry) {
             return 0 as *mut PageTableEntry;
         }
 
-        if PageTableEntry::is_readable(&l2_entry)
-            | PageTableEntry::is_writeable(&l2_entry)
-            | PageTableEntry::is_executable(&l2_entry)
+        if PageTableEntry::is_readable(&l1_entry)
+            | PageTableEntry::is_writeable(&l1_entry)
+            | PageTableEntry::is_executable(&l1_entry)
         {
-            return &mut self.entries[vpn2] as *mut PageTableEntry;
+            ppn = PageTableEntry::physical_address(&l1_entry);
+            return unsafe { &mut (*l1_table).entries[vpn1] as *mut PageTableEntry };
         } else {
-            let l1_table: *mut PageTable = ppn as *mut PageTable;
-            let l1_entry: PageTableEntry = unsafe { (*l1_table).entries[vpn1] };
+            // FIX: Update ppn to point to the level 0 table address before creating l0_table
+            ppn = PageTableEntry::physical_address(&l1_entry);
+            let l0_table: *mut PageTable = ppn as *mut PageTable;
+            let l0_entry: PageTableEntry = unsafe { (*l0_table).entries[vpn0] };
 
-            if !PageTableEntry::is_valid(&l1_entry) {
+            if !PageTableEntry::is_valid(&l0_entry) {
                 return 0 as *mut PageTableEntry;
             }
 
-            if PageTableEntry::is_readable(&l1_entry)
-                | PageTableEntry::is_writeable(&l1_entry)
-                | PageTableEntry::is_executable(&l1_entry)
+            if PageTableEntry::is_readable(&l0_entry)
+                | PageTableEntry::is_writeable(&l0_entry)
+                | PageTableEntry::is_executable(&l0_entry)
             {
-                ppn = PageTableEntry::physical_address(&l1_entry);
-                return unsafe { &mut (*l1_table).entries[vpn1] as *mut PageTableEntry };
+                return unsafe { &mut (*l0_table).entries[vpn0] as *mut PageTableEntry };
             } else {
-                let l0_table: *mut PageTable = ppn as *mut PageTable;
-                let l0_entry: PageTableEntry = unsafe { (*l0_table).entries[vpn0] };
-
-                if !PageTableEntry::is_valid(&l0_entry) {
-                    return 0 as *mut PageTableEntry;
-                }
-
-                if PageTableEntry::is_readable(&l0_entry)
-                    | PageTableEntry::is_writeable(&l0_entry)
-                    | PageTableEntry::is_executable(&l0_entry)
-                {
-                    // ppn = PageTableEntry::physical_address(&l0_entry);
-                    return unsafe { &mut (*l0_table).entries[vpn0] as *mut PageTableEntry };
-                } else {
-                    uart::uart_print(
-                        "Page Fault!: The Virtual Address is not mapped to any Physical Address.",
-                    );
-                }
+                uart::uart_print(
+                    "Page Fault!: The Virtual Address is not mapped to any Physical Address.",
+                );
             }
         }
-        0 as *mut PageTableEntry //Replace identity mapping with offset mapping
     }
+    0 as *mut PageTableEntry
+}
 
-    pub fn unmap_range(&mut self, va: usize, size: usize) {
+    pub fn unmap_range(&mut self, pmm: &mut PhysicalMemoryManager, va: usize, size: usize) {
         let number_of_pages: usize = (size + 4095) / 4096;
+        let mut virtual_address = va;
 
         for i in 0..number_of_pages {
-            let entry_ptr: *mut PageTableEntry = PageTable::entry_walk(self, va);
-            let physical_address: usize = unsafe { (*entry_ptr).physical_address() };
+            let entry_ptr: *mut PageTableEntry = PageTable::entry_walk(self, virtual_address);
 
             if entry_ptr == core::ptr::null_mut() {
                 uart::uart_print("Page with vitual address: ");
-                uart::uart_print_hex(va);
-                uart::uart_print("\nand physical address: ");
-                uart::uart_print_hex(physical_address);
+                uart::uart_print_hex(virtual_address);
                 uart::uart_print("\nis already unmapped or doesn't exist.\n");
                 continue;
             }
+
+            let physical_address: usize = unsafe { (*entry_ptr).physical_address() };
+
             unsafe {
                 (*entry_ptr).entry = 0;
             }
-            let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = PMM.lock();
-            pmm_lock.dealloc_page(physical_address);
+            // let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = PMM.lock();
+            pmm.dealloc_page(physical_address);
 
-            unsafe{core::arch::asm!("sfence.vma")}; //Flush TLB
-
+            virtual_address += 4096
         }
+        unsafe { core::arch::asm!("sfence.vma") }; //Flush TLB
     }
 }
 

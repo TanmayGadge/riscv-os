@@ -19,101 +19,111 @@ use crate::pmm::PMM;
 use crate::{paging::KERNEL_PAGE_TABLE, pmm::PhysicalMemoryManager};
 
 pub static TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub const UART_PADDR: usize = 0x1000_0000;
+pub static mut EARLY_PMM: Option<PhysicalMemoryManager> = None;
 
 global_asm!(include_str!("entry.s"));
 
 unsafe extern "C" {
-    unsafe static _heap_start: u8;
-    unsafe static _start: u8;
+    unsafe static _heap_start: usize;
+    unsafe static _start: usize;
     unsafe fn trap_vector();
-    unsafe static _bss_end: u8;
+    unsafe static _bss_end: usize;
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kmain() -> ! {
-    uart::uart_print("Booting Kernel...\n");
+pub extern "C" fn kinit() -> usize {
+    const KERNEL_OFFSET: usize = 0xFFFFFFFF00000000;
+    const RAM_END: usize = 0x88000000;
 
-    let heap_start: usize = core::ptr::addr_of!(_heap_start) as usize;
-    pub const RAM_END: usize = 0x88000000;
+    let to_phys = |addr: usize| -> usize {
+        if addr >= KERNEL_OFFSET {
+            addr - KERNEL_OFFSET
+        } else {
+            addr
+        }
+    };
 
-    unsafe{
-        pmm::init_vma_pool();
-    }
+    let print_phys = |s: &str| {
+        let phys_ptr: *const u8 = to_phys(s.as_ptr() as usize) as *const u8;
+        for i in 0..s.len() {
+            unsafe { uart::uart_putc_phys(*phys_ptr.add(i)); }
+        }
+    };
 
-    {
-        let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = PMM.lock();
-        *pmm_lock = PhysicalMemoryManager::new(heap_start, RAM_END);
-    }
+    print_phys("Booting Kernel...\n");
 
-    // let mut pmm: pmm::PhysicalMemoryManager = pmm::PhysicalMemoryManager::new(heap_start, RAM_END);
+    let heap_start_phys: usize = to_phys(unsafe { core::ptr::addr_of!(_heap_start) as usize });
+    
+    let mut local_pmm: PhysicalMemoryManager = PhysicalMemoryManager::new(heap_start_phys, RAM_END);
 
-    // let mut my_list = alloc::vec::Vec::new();
-    // my_list.push(42);
-
-    // let root_ptr: *mut PageTable = pmm.alloc_page().expect("OOM") as *mut PageTable;
-    let root_ptr: *mut PageTable = {
-        let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = PMM.lock();
-        pmm_lock.alloc_page().expect("OOM") as *mut PageTable
+    let root_ptr: *mut PageTable = match local_pmm.alloc_page() {
+        Some(ptr) => ptr as *mut PageTable,
+        None => loop {}
     };
 
     let root_table: &'static mut PageTable = unsafe { &mut *root_ptr };
-    root_table.entries = [paging::PageTableEntry { entry: 0 }; 512];
+    for i in 0..512 {
+        unsafe {
+            core::ptr::write_volatile(
+                &mut root_table.entries[i],
+                paging::PageTableEntry { entry: 0 }
+            );
+        }
+    }
 
     {
-        let mut pmm_lock: MutexGuard<'_, PhysicalMemoryManager> = PMM.lock();
-
+        root_table.map(&mut local_pmm, UART_PADDR, UART_PADDR, PageTableEntryFlags::RWX);
         root_table.map(
-            &mut pmm_lock,
-            0x1000_0000,
-            0x1000_0000,
-            PageTableEntryFlags::RWX,
+            &mut local_pmm, 
+            UART_PADDR + KERNEL_OFFSET, 
+            UART_PADDR, 
+            PageTableEntryFlags::RWX
         );
 
-        uart::uart_print("Building Page Tables..\n");
+        print_phys("Building Page Tables..\n");
 
-        let kernel_start: usize = core::ptr::addr_of!(_start) as usize;
-        let bss_end: usize = core::ptr::addr_of!(_bss_end) as usize;
-        let map_limit: usize = bss_end + (1024 * 1024);
+        let kernel_start_phys: usize = to_phys(core::ptr::addr_of!(_start) as usize);
+        let bss_end_phys: usize = to_phys(core::ptr::addr_of!(_bss_end) as usize);
 
-        let mut addr: usize = kernel_start;
+        let mut addr: usize = kernel_start_phys;
 
-        //Identity mapping
-        while addr <= RAM_END {
-            root_table.map(&mut pmm_lock, addr, addr, PageTableEntryFlags::RWX);
+        while addr <= bss_end_phys {
+            root_table.map(&mut local_pmm, addr, addr, PageTableEntryFlags::RWX);
             addr += 4096;
         }
-        uart::uart_print("\n");
-        uart::uart_print("Kernel start address: ");
-        uart::uart_print_hex(kernel_start);
-        uart::uart_print("\n");
 
-        uart::uart_print("BSS End Address: ");
-        uart::uart_print_hex(bss_end);
-        uart::uart_print("\n");
-
-        uart::uart_print("Heap Start Address: ");
-        uart::uart_print_hex(heap_start);
-        uart::uart_print("\n");
-
-        uart::uart_print("\n");
+        let mut phys_addr = 0x8000_0000;
+        while phys_addr <= RAM_END {
+            root_table.map(&mut local_pmm, phys_addr + KERNEL_OFFSET, phys_addr, PageTableEntryFlags::RWX);
+            root_table.map(&mut local_pmm, phys_addr, phys_addr, PageTableEntryFlags::RWX);
+            phys_addr += 4096;
+        }
     }
-
-    *KERNEL_PAGE_TABLE.lock() = Some(root_table);
-    
-
-    uart::uart_print("Page Tables Built!\n");
-
-    uart::uart_print("Enabling MMU...\n");
-
-    let root_ppn: usize = (root_ptr as usize) >> 12;
-    let satp_val: usize = (8 << 60) | root_ppn; //for Sv39, mode = 8
 
     unsafe {
-        core::arch::asm!("csrw satp, {}", in(reg) satp_val);
-        core::arch::asm!("sfence.vma"); //Clear TLB
+        let early_pmm_phys: *mut Option<PhysicalMemoryManager> = to_phys(core::ptr::addr_of!(EARLY_PMM) as usize) as *mut Option<PhysicalMemoryManager>;
+        core::ptr::write_volatile(early_pmm_phys, Some(local_pmm));
+    }
+    
+    print_phys("Page Tables Built! Enabling MMU...\n");
+    
+    root_ptr as usize
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmain(root_ptr_addr: usize) -> ! {
+    unsafe {
+        let early_ptr: *mut Option<PhysicalMemoryManager> = core::ptr::addr_of_mut!(EARLY_PMM);
+        if let Some(early) = core::ptr::replace(early_ptr, None) {
+            *PMM.lock() = early;
+        }
     }
 
-    uart::uart_print("MMU Enabled! We are still alive!\n");
+    let root_table: &'static mut PageTable = unsafe { &mut *(root_ptr_addr as *mut PageTable) };
+    *KERNEL_PAGE_TABLE.lock() = Some(root_table);
+
+    pmm::init_vma_pool();
 
     uart::uart_print("Starting Dynamic memory allocation test...\n");
     uart::uart_print("Initializing a Vec<usize>...\n");
@@ -133,7 +143,7 @@ pub extern "C" fn kmain() -> ! {
 
     uart::uart_print("Enabling Trap Handling...\n");
 
-    let trap_addr: usize = trap_vector as *const () as usize; // *const() is a raw pointer
+    let trap_addr: usize = trap_vector as *const () as usize;
 
     assert!(trap_addr % 4 == 0, "Trap handler must be 4-byte aligned!");
 
@@ -144,12 +154,11 @@ pub extern "C" fn kmain() -> ! {
         let next: usize = now + 10_000_000;
 
         core::arch::asm!("csrw stimecmp, {}", in(reg) next);
-
         core::arch::asm!("csrw stvec, {}", in(reg) trap_addr);
 
         uart::uart_print("stvec initalised!\n");
 
-        core::arch::asm!("csrrsi x0, sstatus, 2", options(nostack, nomem)); //set SIE (bit 1) as 1 (set immediate)
+        core::arch::asm!("csrrsi x0, sstatus, 2", options(nostack, nomem));
 
         uart::uart_print("sstatus initalised!\n");
 
@@ -157,18 +166,12 @@ pub extern "C" fn kmain() -> ! {
             "csrrs x0, sie, {}",
             in(reg) 32usize,
             options(nostack, nomem)
-        ); //set STIE (bit 5) as 1
+        );
 
         uart::uart_print("STIE initialed\n");
     }
 
     uart::uart_print("Trap Handling Enabled!\n");
-
-    // uart::uart_print("Calling ebreak...\n\n");
-    // unsafe {
-    //     core::arch::asm!("ebreak");
-    // }
-    // uart::uart_print("ebreak resolved!\n\n");
 
     let mut last_tick: usize = 0;
     loop {
@@ -184,6 +187,21 @@ pub extern "C" fn kmain() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    uart::uart_print("KERNEL PANIC\n");
+    let to_phys = |addr: usize| -> usize {
+        if addr >= 0xFFFFFFFF00000000 {
+            addr - 0xFFFFFFFF00000000
+        } else {
+            addr
+        }
+    };
+
+    let print_phys = |s: &str| {
+        let phys_ptr: *const u8 = to_phys(s.as_ptr() as usize) as *const u8;
+        for i in 0..s.len() {
+            unsafe { uart::uart_putc_phys(*phys_ptr.add(i)); }
+        }
+    };
+
+    print_phys("\n=== KERNEL PANIC ===\n");
     loop {}
 }
