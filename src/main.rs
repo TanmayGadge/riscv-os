@@ -7,6 +7,7 @@ mod paging;
 mod pmm;
 mod trap;
 mod uart;
+mod process;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -29,6 +30,27 @@ unsafe extern "C" {
     unsafe static _bss_end: u8;
 }
 
+fn task_a() {
+    loop {
+        crate::uart::uart_print("Task A is running!\n");
+        
+        // A simple delay so it doesn't spam your terminal too fast
+        for _ in 0..500000 { unsafe { core::arch::asm!("nop"); } }
+        
+        // Hand control back to the scheduler
+        crate::process::yield_task(); 
+    }
+}
+
+fn task_b() {
+    loop {
+        crate::uart::uart_print("Task B is running!\n");
+        
+        for _ in 0..500000 { unsafe { core::arch::asm!("nop"); } }
+        
+        crate::process::yield_task();
+    }
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
     uart::uart_print("Booting Kernel...\n");
@@ -155,15 +177,30 @@ pub extern "C" fn kmain() -> ! {
     // }
     // uart::uart_print("ebreak resolved!\n\n");
 
+   // PASTE THIS INSTEAD:
+    uart::uart_print("Setting up Tasks...\n");
+
+    unsafe {
+        crate::process::TASK_MANAGER.task_num = 1;
+        crate::process::TASK_MANAGER.tasks[0].state = crate::process::TaskState::Running;
+    }
+    crate::process::add_task(task_a);
+    crate::process::add_task(task_b);
+
+    uart::uart_print("Starting Scheduler...\n");
+
     let mut last_tick: usize = 0;
     loop {
-        let current_tick: usize = TICK_COUNT.load(Ordering::Relaxed);
+        let current_tick: usize = TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
         if current_tick != last_tick {
             uart::uart_print("Tick: ");
             uart::uart_print_hex(current_tick);
             uart::uart_print("!\n");
             last_tick = current_tick;
         }
+
+        // This line runs the scheduler!
+        crate::process::schedule(); 
     }
 }
 
